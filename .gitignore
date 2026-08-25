@@ -1,0 +1,24 @@
+# Secrets & runtime config — NEVER commit these
+keys.yaml
+*.env
+.env
+!.env.example
+# the real keys file lives at /etc/gatekeeper/keys.yaml; only the .example ships
+
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.venv/
+venv/
+.pytest_cache/
+
+# Logs & data
+*.jsonl
+*.log
+
+# OS / editor
+.DS_Store
+*.swp
+.idea/
+.vscode/

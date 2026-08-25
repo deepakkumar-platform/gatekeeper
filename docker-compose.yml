@@ -1,0 +1,16 @@
+services:
+  gatekeeper:
+    build: .
+    image: gatekeeper:0.4.0
+    container_name: gatekeeper
+    restart: unless-stopped
+    network_mode: host
+    env_file: .env
+    volumes:
+      - /etc/gatekeeper:/etc/gatekeeper:ro
+      - /var/log/gatekeeper:/var/log/gatekeeper
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request,sys; sys.exit(0 if urllib.request.urlopen('http://127.0.0.1:8080/healthz', timeout=3).status==200 else 1)"]
+      interval: 30s
+      timeout: 5s
+      retries: 3

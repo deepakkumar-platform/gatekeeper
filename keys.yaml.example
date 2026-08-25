@@ -1,0 +1,17 @@
+apps:
+  prod-dashboard:
+    key_hash: "REPLACE_WITH_SHA256_HEX"
+    active: true
+    rate_limit_per_min: 100
+    created_at: "2026-01-01T00:00:00Z"
+    notes: "Full-access app, owner: platform team"
+    # allowed_models omitted (or empty) => this key may call ANY model
+
+  small-model-only:
+    key_hash: "REPLACE_WITH_SHA256_HEX"
+    active: true
+    rate_limit_per_min: 30
+    created_at: "2026-01-01T00:00:00Z"
+    notes: "Restricted app, owner: mobile team"
+    allowed_models:            # this key may ONLY call these models
+      - gemma4:e4b

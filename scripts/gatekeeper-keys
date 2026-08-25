@@ -1,0 +1,226 @@
+#!/usr/bin/env python3
+"""
+gatekeeper-keys — admin CLI for the Gatekeeper gateway keys file.
+
+Usage:
+  gatekeeper-keys list
+  gatekeeper-keys issue   <app_name> [--rate <per_min>] [--notes "<text>"] [--models <m> ...]
+  gatekeeper-keys rotate  <app_name> [--rate <per_min>]
+  gatekeeper-keys disable <app_name>
+  gatekeeper-keys enable  <app_name>
+  gatekeeper-keys remove  <app_name>
+
+The plaintext key is printed *once* on `issue` and `rotate`. After that
+only its SHA-256 hash remains on disk; there is no way to recover the
+plaintext. Hand it to the requesting team securely (1Password, sealed
+secret, etc.) and they store it on their side.
+
+Environment:
+  GATEKEEPER_KEYS_FILE   path to the YAML keys file (default: /etc/gatekeeper/keys.yaml)
+"""
+
+from __future__ import annotations
+
+import argparse
+import datetime as dt
+import hashlib
+import os
+import secrets
+import sys
+from pathlib import Path
+
+import yaml
+
+KEYS_FILE = os.environ.get("GATEKEEPER_KEYS_FILE", "/etc/gatekeeper/keys.yaml")
+DEFAULT_RATE = 60
+KEY_PREFIX = "sk-gatekeeper-"
+
+
+def _load() -> dict:
+    p = Path(KEYS_FILE)
+    if not p.exists():
+        return {"apps": {}}
+    with p.open("r", encoding="utf-8") as fh:
+        data = yaml.safe_load(fh) or {}
+    data.setdefault("apps", {})
+    return data
+
+
+def _save(data: dict) -> None:
+    p = Path(KEYS_FILE)
+    p.parent.mkdir(parents=True, exist_ok=True)
+    tmp = p.with_suffix(p.suffix + ".tmp")
+    with tmp.open("w", encoding="utf-8") as fh:
+        yaml.safe_dump(data, fh, sort_keys=False, default_flow_style=False)
+    os.replace(tmp, p)
+    try:
+        os.chmod(p, 0o600)
+    except OSError:
+        pass
+
+
+def _now_iso() -> str:
+    return dt.datetime.now(dt.timezone.utc).replace(microsecond=0).isoformat()
+
+
+def _generate_key() -> tuple[str, str]:
+    """Return (plaintext, sha256_hex)."""
+    raw = secrets.token_urlsafe(36)
+    plaintext = f"{KEY_PREFIX}{raw}"
+    h = hashlib.sha256(plaintext.encode("utf-8")).hexdigest()
+    return plaintext, h
+
+
+def cmd_list(_args: argparse.Namespace) -> int:
+    data = _load()
+    apps = data.get("apps") or {}
+    if not apps:
+        print("(no apps configured)")
+        return 0
+    fmt = "{:<20} {:<7} {:>7}/min  {:<20} {:<20} {}"
+    print(fmt.format("app", "active", "rate", "models", "created_at", "notes"))
+    print("-" * 100)
+    for name, cfg in sorted(apps.items()):
+        models = cfg.get("allowed_models") or []
+        models_str = ",".join(models) if models else "(all)"
+        print(
+            fmt.format(
+                name,
+                "yes" if cfg.get("active", True) else "no",
+                cfg.get("rate_limit_per_min", DEFAULT_RATE),
+                models_str,
+                cfg.get("created_at", ""),
+                cfg.get("notes", ""),
+            )
+        )
+    return 0
+
+
+def cmd_issue(args: argparse.Namespace) -> int:
+    data = _load()
+    if args.app_name in data["apps"]:
+        print(f"error: app '{args.app_name}' already exists; use rotate to reissue", file=sys.stderr)
+        return 2
+    plaintext, key_hash = _generate_key()
+    data["apps"][args.app_name] = {
+        "key_hash": key_hash,
+        "active": True,
+        "rate_limit_per_min": args.rate,
+        "created_at": _now_iso(),
+        "notes": args.notes or "",
+        # empty list = all models allowed; a non-empty list restricts this key
+        "allowed_models": list(args.models) if args.models else [],
+    }
+    _save(data)
+    print(f"issued key for '{args.app_name}':")
+    print(f"  {plaintext}")
+    print()
+    print("store this key now — it cannot be recovered later.")
+    return 0
+
+
+def cmd_rotate(args: argparse.Namespace) -> int:
+    data = _load()
+    if args.app_name not in data["apps"]:
+        print(f"error: app '{args.app_name}' not found", file=sys.stderr)
+        return 2
+    plaintext, key_hash = _generate_key()
+    entry = data["apps"][args.app_name]
+    entry["key_hash"] = key_hash
+    entry["rotated_at"] = _now_iso()
+    if args.rate is not None:
+        entry["rate_limit_per_min"] = args.rate
+    # only change model restrictions if --models was given; otherwise preserve
+    if args.models is not None:
+        entry["allowed_models"] = list(args.models)
+    _save(data)
+    print(f"rotated key for '{args.app_name}':")
+    print(f"  {plaintext}")
+    print()
+    print("the previous key is now invalid. distribute the new one.")
+    return 0
+
+
+def cmd_disable(args: argparse.Namespace) -> int:
+    data = _load()
+    if args.app_name not in data["apps"]:
+        print(f"error: app '{args.app_name}' not found", file=sys.stderr)
+        return 2
+    data["apps"][args.app_name]["active"] = False
+    _save(data)
+    print(f"disabled '{args.app_name}'")
+    return 0
+
+
+def cmd_enable(args: argparse.Namespace) -> int:
+    data = _load()
+    if args.app_name not in data["apps"]:
+        print(f"error: app '{args.app_name}' not found", file=sys.stderr)
+        return 2
+    data["apps"][args.app_name]["active"] = True
+    _save(data)
+    print(f"enabled '{args.app_name}'")
+    return 0
+
+
+def cmd_remove(args: argparse.Namespace) -> int:
+    data = _load()
+    if args.app_name not in data["apps"]:
+        print(f"error: app '{args.app_name}' not found", file=sys.stderr)
+        return 2
+    del data["apps"][args.app_name]
+    _save(data)
+    print(f"removed '{args.app_name}'")
+    return 0
+
+
+def build_parser() -> argparse.ArgumentParser:
+    p = argparse.ArgumentParser(prog="gatekeeper-keys", description="Manage Gatekeeper gateway API keys")
+    sub = p.add_subparsers(dest="cmd", required=True)
+
+    sub.add_parser("list", help="list all configured apps").set_defaults(func=cmd_list)
+
+    p_issue = sub.add_parser("issue", help="issue a new key for a new app")
+    p_issue.add_argument("app_name")
+    p_issue.add_argument("--rate", type=int, default=DEFAULT_RATE, help="requests per minute")
+    p_issue.add_argument("--notes", default="", help="free-form notes (owner team, contact)")
+    p_issue.add_argument(
+        "--models", nargs="*", default=None, metavar="MODEL",
+        help="restrict this key to these model(s), e.g. --models gemma4:e4b. "
+             "Omit for access to all models.",
+    )
+    p_issue.set_defaults(func=cmd_issue)
+
+    p_rotate = sub.add_parser("rotate", help="rotate the key for an existing app")
+    p_rotate.add_argument("app_name")
+    p_rotate.add_argument("--rate", type=int, default=None, help="update rate limit while rotating")
+    p_rotate.add_argument(
+        "--models", nargs="*", default=None, metavar="MODEL",
+        help="replace the key's model restrictions (pass with no values to clear "
+             "restrictions = all models). Omit to keep existing restrictions.",
+    )
+    p_rotate.set_defaults(func=cmd_rotate)
+
+    p_disable = sub.add_parser("disable", help="deactivate an app without removing it")
+    p_disable.add_argument("app_name")
+    p_disable.set_defaults(func=cmd_disable)
+
+    p_enable = sub.add_parser("enable", help="reactivate a disabled app")
+    p_enable.add_argument("app_name")
+    p_enable.set_defaults(func=cmd_enable)
+
+    p_remove = sub.add_parser("remove", help="permanently remove an app")
+    p_remove.add_argument("app_name")
+    p_remove.set_defaults(func=cmd_remove)
+
+    return p
+
+
+def main() -> int:
+    parser = build_parser()
+    args = parser.parse_args()
+    return args.func(args)
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())
